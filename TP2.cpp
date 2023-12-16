@@ -96,9 +96,9 @@ int initSocks();
 
 int ProcessMsg(CHAR* buffer);
 HANDLE hEventsESC;
-HANDLE hMutexChange, hMutexIncrementNSEQ;
-int nSeq = 0;
-bool nseqIncrement = false, mustWrite = false;
+HANDLE hMutexChange, hMutexIncrementNSEQ, hMutexSend;
+int nSeqSend = 1, nseqRecv = 2;
+bool mustWrite = false;
 
 char tecla = 0;
 #define ESC		   0x1B
@@ -111,6 +111,7 @@ void main(void)
 	hEventsESC = CreateEvent(NULL, TRUE, FALSE, L"EscEvent");
 	hMutexChange = CreateMutex(NULL, FALSE, L"MutexChange");
 	hMutexIncrementNSEQ = CreateMutex(NULL, FALSE, L"MutexIncrementNSEQ");
+	hMutexSend = CreateMutex(NULL, FALSE, L"MutexSend");
 	
 	HANDLE hThread1 = (HANDLE)_beginthreadex(
 		NULL,
@@ -145,6 +146,8 @@ void main(void)
 	CloseHandle(hThread2);
 	CloseHandle(hEventsESC);
 	CloseHandle(hMutexChange);
+	CloseHandle(hMutexSend);
+	CloseHandle(hMutexIncrementNSEQ);
 	
 	closingOPCvariables();
 }
@@ -173,12 +176,24 @@ void loopingReadOPC() {
 		if (WaitForSingleObject(hMutexChange, 0) == WAIT_OBJECT_0) {
 			if (mustWrite) {
 				WriteItem(pIOPCItemMgt[1], hServerItemWrite, writeVals, 3);
+				mustWrite = FALSE;
 			}
 			ReleaseMutex(hMutexChange);
 		}
-		sprintf_s(variableProcess, 35, "%06d$55%s", nSeq, data_readed);
+
+		// Região crítica para numero de sequência
+		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+		sprintf_s(variableProcess, 35, "%06d$55%s", nSeqSend, data_readed);
+		nSeqSend = nSeqSend + 2;
+		ReleaseMutex(hMutexIncrementNSEQ);
+		// Fim da região crítica
+
+		//Região crítica envio de dados no socket
+		WaitForSingleObject(hMutexSend, INFINITE);
 		iSendResult = send(ClientSocket, variableProcess, strlen(variableProcess), 0);
-		nseqIncrement = true;
+		ReleaseMutex(hMutexSend);
+		// Fim da região crítica
+
 		memset(variableProcess, 0, 35);
 
 	} while (TRUE);
@@ -194,6 +209,7 @@ void InitOPCvariables() {
 	printf("Instantiating the MATRIKON OPC Server for Simulation...\n");
 	pIOPCServer = InstantiateServer((wchar_t*)OPC_SERVER_NAME);
 
+	// inicializando as variáveis de escrita
 	for (int i = 0; i < 3; i++) {
 		VariantInit(&writeVals[i]);
 		writeVals[i].vt = typesWrite[i];
@@ -207,7 +223,7 @@ void InitOPCvariables() {
 	}
 
 	// Add the OPC item in order to print the item name in the console.
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 3; i++) {
 		printf("Adding the READ item %ls to the group 1...\n", itemID_Read[i]);
 		AddTheItem(pIOPCItemMgt[0], hServerItemRead[i], (wchar_t*)itemID_Read[i], typesRead[i]);
 	}
@@ -241,7 +257,7 @@ void closingOPCvariables() {
 	//pIConnectionPoint->Release();
 	pSOCDataCallback->Release();
 
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 3; i++) {
 		// Remove the OPC item:
 		printf("Removing the OPC item %ws\n", itemID_Read[i]);
 		RemoveItem(pIOPCItemMgt[0], hServerItemRead[i]);
@@ -325,65 +341,91 @@ int initSocks() {
 }
 
 int ProcessMsg(CHAR* buffer) {
-	PSTR pointer, pointer2, pointer3, nextToken;
-	CHAR part[25];
+	PSTR pointer2, pointer3, pointer1, nextToken;	
+	CHAR bufferOut[10];
+	int iSendResult = 0, nSeq;
+	bool cmp, cmpBigger;
+
+
+	pointer1 = strtok_s(buffer, "$", &nextToken);
+	pointer2 = strtok_s(NULL, "$", &nextToken);
 	
-	CHAR bufferOut[60];
-	int iSendResult = 0;
+	if (strcmp(pointer2, "99") == 0) {
+		//strncpy_s(part, nextToken, 6);
+		printf("reicived: %s$%s - ", pointer1, pointer2);
+		nSeq = atoi(pointer2);
 
-	pointer3 = strtok_s(buffer, "$", &nextToken);
-	pointer = strtok_s(NULL, "$", &nextToken);
-	do {
-		memset(bufferOut, 0, 60);
-		memset(part, 0, 25);
-		if (strcmp(pointer, "99") == 0) {
-			strncpy_s(part, nextToken, 6);
-			printf("reicived: %s$%s\n", pointer, part);
-			pointer = nextToken + 6;
-			nSeq = atoi(part) + 1;
+		// Região crítica - Número de sequência
+		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+		cmp = nSeq == nseqRecv;
+		cmpBigger = nSeq > nseqRecv;
+		nseqRecv = nseqRecv + 2;
+		ReleaseMutex(hMutexIncrementNSEQ);
+		// Fim região crítica
 
-
-			sprintf_s(bufferOut, 60, "%06d$55%s", nSeq, data_readed);
-			iSendResult = send(ClientSocket, bufferOut, strlen(bufferOut), 0);
+		if (cmp) {
+			puts("Sequência conforme");
 		}
-
-		/*else if (strcmp(pointer, "33") == 0) {
-			strncpy_s(part, nextToken, 6);
-			printf("reicived: %s|%s\n", pointer, part);
-			pointer = nextToken + 6;
-			nSeq = atoi(part);
-		}*/
-
-		else if (strcmp(pointer, "45") == 0) {
-			nSeq = atoi(pointer3) + 1;
-
-			// strncpy_s(next, nextToken, 19);
-			printf("reicived: %s$%s$%s\n", pointer3, pointer, nextToken);
-
-			pointer2 = strtok_s(NULL, "$", &nextToken);
-			aux1 = (double)atof(pointer2);
-			pointer2 = strtok_s(NULL, "$", &nextToken);
-			aux2 = (float)atof(pointer2);
-			pointer2 = strtok_s(NULL, "$", &nextToken);
-			aux3 = (unsigned)atoi(pointer2);
-			
-			writeVals[0].dblVal = aux1;
-			writeVals[1].fltVal = aux2;
-			writeVals[2].intVal = aux3;
-
-			SetEvent(/*hEvents[1]*/hEvents[2]);
-			WaitForSingleObject(/*hEvents[3]*/hEvents[4], INFINITE);
-			ResetEvent(/*hEvents[3]*/hEvents[4]);
-
-			sprintf_s(bufferOut, 60, "%06d$00", nSeq);
-			iSendResult = send(ClientSocket, bufferOut, strlen(bufferOut), 0);
+		else if(cmpBigger){
+			puts("Resposta a msg posterior");
 		}
 		else {
-
+			puts("Resposta a msg anterior");
 		}
-		pointer = strtok_s(pointer, "|", &nextToken);
-	} while (pointer != NULL && iSendResult != SOCKET_ERROR);
+	}
 
+	else if (strcmp(pointer2, "45") == 0) {
+		nSeq = atoi(pointer1);
+
+		// strncpy_s(next, nextToken, 19);
+		printf("reicived: %s$%s$%s - ", pointer1, pointer2, nextToken);
+		
+		// Região crítica - Número de sequência
+		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+		cmp = nSeq == nseqRecv;
+		cmpBigger = nSeq > nseqRecv;
+		nseqRecv = nseqRecv + 2;
+		ReleaseMutex(hMutexIncrementNSEQ);
+		// Fim região crítica
+
+		if (cmp) {
+			puts("Sequência conforme");
+		}
+		else if (cmpBigger) {
+			puts("Resposta a msg posterior");
+		}
+		else {
+			puts("Resposta a msg anterior");
+		}
+
+		pointer3 = strtok_s(NULL, "$", &nextToken);
+		aux1 = (double)atof(pointer3);
+		pointer3 = strtok_s(NULL, "$", &nextToken);
+		aux2 = (float)atof(pointer3);
+		pointer3 = strtok_s(NULL, "$", &nextToken);
+		aux3 = (unsigned)atoi(pointer3);
+		
+		// Seção crítica - alteração dos valores de escrita OPC
+		WaitForSingleObject(hMutexChange, INFINITE);
+		writeVals[0].dblVal = aux1;
+		writeVals[1].fltVal = aux2;
+		writeVals[2].intVal = aux3;
+		mustWrite = TRUE;
+		ReleaseMutex(hMutexChange);
+		// Fim seção crítica
+
+		memset(bufferOut, 0, 10);
+		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+		sprintf_s(bufferOut, 10, "%06d$00", nSeq);
+		nSeqSend++;
+		nseqRecv++;
+		ReleaseMutex(hMutexIncrementNSEQ);
+		
+		iSendResult = send(ClientSocket, bufferOut, strlen(bufferOut), 0);
+	}
+	else {
+
+	}
 	if (iSendResult == SOCKET_ERROR) {
 
 		printf("send failed: %d\n", WSAGetLastError());
@@ -409,11 +451,11 @@ DWORD WINAPI loopingReadSocket(LPVOID lpParameter) {
 		}
 		printf("New connection accepted..\n");
 
-		const WSAEVENT evs[2] = { hEvents[0], (WSAEVENT)ClientSocket };
+		const WSAEVENT evs[2] = { hEventsESC, (WSAEVENT)ClientSocket };
 		DWORD res;
 		while (true) {
 			bufLen = DEFAULT_BUFLEN;
-			res = WaitForSingleObject(hEvents[0], 0);
+			res = WaitForMultipleObjects(2,evs,FALSE,INFINITE);
 			if (res == WAIT_OBJECT_0) {
 				break;
 			}
@@ -442,11 +484,28 @@ DWORD WINAPI loopingReadSocket(LPVOID lpParameter) {
 }
 
 DWORD WINAPI loopEsc(LPVOID lpParameter) {
+	char Requisition[10];
+	int iSendResult;
+	memset(Requisition, 0, 10);
 	while (tecla != ESC) {
 		tecla = _getch();
-		if (tecla == 's')
-			SetEvent(hEvents[1]);
+		if (tecla == 's') {
+			// Região Crítica número de sequencia
+			WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+			sprintf_s(Requisition, 35, "%06d$33", nSeqSend);
+			nSeqSend = nSeqSend + 2;
+			ReleaseMutex(hMutexIncrementNSEQ);
+			// Fim da região crítica
+
+			// Região crítica envio de dados pela rede
+			WaitForSingleObject(hMutexSend, INFINITE);
+			iSendResult = send(ClientSocket, Requisition, strlen(Requisition), 0);
+			ReleaseMutex(hMutexSend);
+			// Fim da seção crítica
+
+			memset(Requisition, 0, 10);
+		}
 	}
-	SetEvent(hEvents[0]);
+	SetEvent(hEventsESC);
 	return 0;
 }
