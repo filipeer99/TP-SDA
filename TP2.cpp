@@ -95,8 +95,11 @@ int initSocks();
 // -------------------- Fim Parte Servidor -------------------- //
 
 int ProcessMsg(CHAR* buffer);
-HANDLE hEvents[5];
-LPCWSTR eventNames[6] = {L"EscEvent", L"Requisition" L"SyncRequest", L"AsyncRequest", L"SyncResponse", L"AsyncResponse"};
+HANDLE hEventsESC;
+HANDLE hMutexChange, hMutexIncrementNSEQ;
+int nSeq = 0;
+bool nseqIncrement = false, mustWrite = false;
+
 char tecla = 0;
 #define ESC		   0x1B
 
@@ -105,10 +108,10 @@ void main(void)
 	InitOPCvariables();
 	initSocks();
 	DWORD dwThreadId1, dwThreadId2;
-
-	for (int i = 0; i < 5; i++) {
-		hEvents[i] = CreateEvent(NULL, TRUE, FALSE, eventNames[i]);
-	}
+	hEventsESC = CreateEvent(NULL, TRUE, FALSE, L"EscEvent");
+	hMutexChange = CreateMutex(NULL, FALSE, L"MutexChange");
+	hMutexIncrementNSEQ = CreateMutex(NULL, FALSE, L"MutexIncrementNSEQ");
+	
 	HANDLE hThread1 = (HANDLE)_beginthreadex(
 		NULL,
 		0,
@@ -129,7 +132,7 @@ void main(void)
 		(CAST_LPDWORD)&dwThreadId2	// casting necessário
 	);
 
-	if (hThread2) printf("Thread de leitura do socket criada com Id= %0x \n", dwThreadId2);
+	if (hThread2) printf("Thread de leitura do teclado criada com Id= %0x \n", dwThreadId2);
 	loopingReadOPC();
 	HANDLE threads[2] = { hThread1, hThread2 };
 	WaitForMultipleObjects(2, threads, TRUE, 5000);
@@ -140,38 +143,43 @@ void main(void)
 
 	CloseHandle(hThread1);
 	CloseHandle(hThread2);
-	for (int i = 0; i < 5; i++) {
-		CloseHandle(hEvents[i]);
-	}
+	CloseHandle(hEventsESC);
+	CloseHandle(hMutexChange);
+	
 	closingOPCvariables();
 }
 
 void loopingReadOPC() {
 	DWORD posH;
-	do {//LPCSTR eventNames[5] = { "EscEvent", "SyncRequest", "AsyncRequest", "SyncResponse", "AsyncResponse"};
-		posH = WaitForMultipleObjects(3, hEvents, FALSE, INFINITE);
-		if (posH - WAIT_OBJECT_0 == 2) {
-			ResetEvent(/*hEvents[2]*/hEvents[3]);
-			bRet = GetMessage(&msg, NULL, 0, 0);
-
-			if (!bRet) {
-				printf("Failed to get windows message! Error code = %d\n", GetLastError());
-				exit(0);
-			}
-
-			memset(data_readed, 0, 50);
-			TranslateMessage(&msg); // This call is not really needed ...
-			DispatchMessage(&msg);  // ... but this one is!
-			SetEvent(/*hEvents[4]*/hEvents[5]);
-		}
-		if (posH - WAIT_OBJECT_0 == 1) {
-			ResetEvent(/*hEvents[1]*/hEvents[2]);
-			WriteItem(pIOPCItemMgt[1], hServerItemWrite, writeVals, 3);
-			SetEvent(/*hEvents[3]*/hEvents[4]);
-		}
-		if (posH - WAIT_OBJECT_0 == 0) {
+	int iSendResult;
+	char variableProcess[35];
+	memset(variableProcess, 0, 35);
+	do {
+		posH = WaitForSingleObject(hEventsESC, 0); 
+		if (posH == WAIT_OBJECT_0){
 			break;
 		}
+
+		bRet = GetMessage(&msg, NULL, 0, 0);
+		if (!bRet) {
+			printf("Failed to get windows message! Error code = %d\n", GetLastError());
+			exit(0);
+		}
+
+		memset(data_readed, 0, 50);
+		TranslateMessage(&msg); // This call is not really needed ...
+		DispatchMessage(&msg);  // ... but this one is!
+
+		if (WaitForSingleObject(hMutexChange, 0) == WAIT_OBJECT_0) {
+			if (mustWrite) {
+				WriteItem(pIOPCItemMgt[1], hServerItemWrite, writeVals, 3);
+			}
+			ReleaseMutex(hMutexChange);
+		}
+		sprintf_s(variableProcess, 35, "%06d$55%s", nSeq, data_readed);
+		iSendResult = send(ClientSocket, variableProcess, strlen(variableProcess), 0);
+		nseqIncrement = true;
+		memset(variableProcess, 0, 35);
 
 	} while (TRUE);
 }
@@ -319,7 +327,7 @@ int initSocks() {
 int ProcessMsg(CHAR* buffer) {
 	PSTR pointer, pointer2, pointer3, nextToken;
 	CHAR part[25];
-	int nSeq;
+	
 	CHAR bufferOut[60];
 	int iSendResult = 0;
 
@@ -330,12 +338,11 @@ int ProcessMsg(CHAR* buffer) {
 		memset(part, 0, 25);
 		if (strcmp(pointer, "99") == 0) {
 			strncpy_s(part, nextToken, 6);
-			printf("reicived: %s|%s\n", pointer, part);
+			printf("reicived: %s$%s\n", pointer, part);
 			pointer = nextToken + 6;
 			nSeq = atoi(part) + 1;
-			SetEvent(/*hEvents[2]*/hEvents[3]);
-			WaitForSingleObject(/*hEvents[4]*/hEvents[5], INFINITE);
-			ResetEvent(/*hEvents[4]*/hEvents[5]);
+
+
 			sprintf_s(bufferOut, 60, "%06d$55%s", nSeq, data_readed);
 			iSendResult = send(ClientSocket, bufferOut, strlen(bufferOut), 0);
 		}
