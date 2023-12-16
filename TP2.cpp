@@ -79,14 +79,12 @@ void closingOPCvariables();
 // -------------------- Fim Parte OPC -------------------- //
 
 
-// -------------------- Começo Parte Servidor -------------------- //
+// -------------------- Começo Parte Cliente TCP/IP -------------------- //
 
-#define DEFAULT_PORT "2342"
+#define DEFAULT_PORT "3445"
 #define DEFAULT_BUFLEN 250
 int iResultSock;
 
-SOCKET ListenSocket = INVALID_SOCKET;
-// Socket temporario para aceitar conexões
 SOCKET ClientSocket = INVALID_SOCKET;
 
 
@@ -139,7 +137,6 @@ void main(void)
 	WaitForMultipleObjects(2, threads, TRUE, 5000);
 
 	closesocket(ClientSocket);
-	closesocket(ListenSocket);
 	WSACleanup();
 
 	CloseHandle(hThread1);
@@ -183,7 +180,7 @@ void loopingReadOPC() {
 
 		// Região crítica para numero de sequência
 		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
-		sprintf_s(variableProcess, 35, "%06d$55%s", nSeqSend, data_readed);
+		sprintf_s(variableProcess, 35, "%05d$55%s", nSeqSend, data_readed);
 		nSeqSend = nSeqSend + 2;
 		ReleaseMutex(hMutexIncrementNSEQ);
 		// Fim da região crítica
@@ -193,7 +190,7 @@ void loopingReadOPC() {
 		iSendResult = send(ClientSocket, variableProcess, strlen(variableProcess), 0);
 		ReleaseMutex(hMutexSend);
 		// Fim da região crítica
-
+		printf("enviado - %s\n", variableProcess);
 		memset(variableProcess, 0, 35);
 
 	} while (TRUE);
@@ -286,6 +283,8 @@ void closingOPCvariables() {
 }
 
 int initSocks() {
+
+	SOCKADDR_IN ServerAddr;
 	WSADATA wsaData;
 
 	// Inicializa Winsock
@@ -295,49 +294,42 @@ int initSocks() {
 		return 1;
 	}
 
-	struct addrinfo* result = NULL, * ptr = NULL, hints;
+	struct addrinfo * ptr = NULL, hints;
 
-	ZeroMemory(&hints, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = AI_PASSIVE;
-
-	// Resolve o local address e a porta porta para ser usada no servidor
-	iResultSock = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
-	if (iResultSock != 0) {
-		printf("getaddrinfo failed: %d\n", iResultSock);
+	ZeroMemory(&ServerAddr, sizeof(ServerAddr));
+	ServerAddr.sin_family = AF_INET;
+	int das = atoi(DEFAULT_PORT);
+	ServerAddr.sin_port = htons(atoi(DEFAULT_PORT));
+	// Substitua inet_addr por inet_pton
+	if (inet_pton(AF_INET, "127.0.0.1", &ServerAddr.sin_addr) != 1) {
+		printf("inet_pton failed: %d\n", WSAGetLastError());
 		WSACleanup();
 		return 1;
 	}
 
-	ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-	printf("Waiting for new connections...\n");
-
-	if (ListenSocket == INVALID_SOCKET) {
-		printf("Error at socket(): %ld\n", WSAGetLastError());
-		freeaddrinfo(result);
+	// Create a SOCKET for connecting to server
+	ClientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (ClientSocket == INVALID_SOCKET) {
+		printf("socket failed with error: %ld\n", WSAGetLastError());
 		WSACleanup();
 		return 1;
 	}
 
-	// Configura a "escuta" do Socket TCP
-	iResultSock = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+	// Connect to server.
+	iResultSock = connect(ClientSocket, (SOCKADDR*)&ServerAddr, sizeof(ServerAddr));
 	if (iResultSock == SOCKET_ERROR) {
-		printf("bind failed with error: %d\n", WSAGetLastError());
-		freeaddrinfo(result);
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
+		closesocket(ClientSocket);
+		ClientSocket = INVALID_SOCKET;
+		printf("socket failed with error: %ld\n", WSAGetLastError());
 	}
-	freeaddrinfo(result);
 
-	if (listen(ListenSocket, 5) == SOCKET_ERROR) {
-		printf("Listen failed with error: %ld\n", WSAGetLastError());
-		closesocket(ListenSocket);
+
+	if (ClientSocket == INVALID_SOCKET) {
+		printf("Unable to connect to server!\n");
 		WSACleanup();
 		return 1;
 	}
+
 }
 
 int ProcessMsg(CHAR* buffer) {
@@ -353,7 +345,7 @@ int ProcessMsg(CHAR* buffer) {
 	if (strcmp(pointer2, "99") == 0) {
 		//strncpy_s(part, nextToken, 6);
 		printf("reicived: %s$%s - ", pointer1, pointer2);
-		nSeq = atoi(pointer2);
+		nSeq = atoi(pointer1);
 
 		// Região crítica - Número de sequência
 		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
@@ -378,7 +370,7 @@ int ProcessMsg(CHAR* buffer) {
 		nSeq = atoi(pointer1);
 
 		// strncpy_s(next, nextToken, 19);
-		printf("reicived: %s$%s$%s - ", pointer1, pointer2, nextToken);
+		printf("recebido: %s$%s$%s - ", pointer1, pointer2, nextToken);
 		
 		// Região crítica - Número de sequência
 		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
@@ -416,12 +408,17 @@ int ProcessMsg(CHAR* buffer) {
 
 		memset(bufferOut, 0, 10);
 		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
-		sprintf_s(bufferOut, 10, "%06d$00", nSeq);
+		sprintf_s(bufferOut, 10, "%05d$00", nSeqSend);
 		nSeqSend++;
 		nseqRecv++;
 		ReleaseMutex(hMutexIncrementNSEQ);
 		
+		// Região crítica envio de dados pela rede
+		WaitForSingleObject(hMutexSend, INFINITE);
 		iSendResult = send(ClientSocket, bufferOut, strlen(bufferOut), 0);
+		ReleaseMutex(hMutexSend);
+		// Fim seção crítica
+		printf("enviado - %s\n", bufferOut);
 	}
 	else {
 
@@ -438,46 +435,30 @@ int ProcessMsg(CHAR* buffer) {
 DWORD WINAPI loopingReadSocket(LPVOID lpParameter) {
 	char recvbuf[DEFAULT_BUFLEN];
 	int bufLen = DEFAULT_BUFLEN;
-
+	DWORD res;
 	while (tecla != ESC) {
-		// Aceita um cliente socket
-		ClientSocket = accept(ListenSocket, NULL, NULL);
-
-		if (ClientSocket == INVALID_SOCKET) {
-			printf("accept failed: %d\n", WSAGetLastError());
-			closesocket(ListenSocket);
-			WSACleanup();
-			break;
+		bufLen = DEFAULT_BUFLEN;
+		memset(recvbuf, 0, bufLen);
+		iResultSock = recv(ClientSocket, recvbuf, 9, 0);
+		if (iResultSock > 8) {
+			iResultSock = recv(ClientSocket, recvbuf+9, 15, 0);
 		}
-		printf("New connection accepted..\n");
 
-		const WSAEVENT evs[2] = { hEventsESC, (WSAEVENT)ClientSocket };
-		DWORD res;
-		while (true) {
-			bufLen = DEFAULT_BUFLEN;
-			res = WaitForMultipleObjects(2,evs,FALSE,INFINITE);
-			if (res == WAIT_OBJECT_0) {
-				break;
-			}
-			memset(recvbuf, 0, bufLen);
-			iResultSock = recv(ClientSocket, recvbuf, bufLen, 0);
+		if (iResultSock > 0) {
+			if (ProcessMsg(recvbuf)) break;
 
-			if (iResultSock > 0) {
-				if (ProcessMsg(recvbuf)) break;
+		}
+		else if (iResultSock == 0) {
+			printf("Connection closing...\n");
+			closesocket(ClientSocket);
+			break;
 
-			}
-			else if (iResultSock == 0) {
-				printf("Connection closing...\n");
-				closesocket(ClientSocket);
-				break;
+		}
 
-			}
-
-			else {
-				printf("recv failed: %d\n", WSAGetLastError());
-				closesocket(ClientSocket);
-				break;
-			}
+		else {
+			printf("recv failed: %d\n", WSAGetLastError());
+			closesocket(ClientSocket);
+			break;
 		}
 	}
 	return 0;
@@ -492,7 +473,7 @@ DWORD WINAPI loopEsc(LPVOID lpParameter) {
 		if (tecla == 's') {
 			// Região Crítica número de sequencia
 			WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
-			sprintf_s(Requisition, 35, "%06d$33", nSeqSend);
+			sprintf_s(Requisition, 35, "%05d$33", nSeqSend);
 			nSeqSend = nSeqSend + 2;
 			ReleaseMutex(hMutexIncrementNSEQ);
 			// Fim da região crítica
@@ -502,7 +483,7 @@ DWORD WINAPI loopEsc(LPVOID lpParameter) {
 			iSendResult = send(ClientSocket, Requisition, strlen(Requisition), 0);
 			ReleaseMutex(hMutexSend);
 			// Fim da seção crítica
-
+			printf("enviado - %s\n", Requisition);
 			memset(Requisition, 0, 10);
 		}
 	}
