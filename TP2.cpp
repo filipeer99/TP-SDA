@@ -201,14 +201,14 @@ void loopingReadOPC() {
 			}
 			ReleaseMutex(hMutexChange);
 		}
-
-		// Região crítica para numero de sequência
-		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
-		sprintf_s(variableProcess, 35, "%05d$55%s", nSeqSend, data_readed);
-		nSeqSend = nSeqSend + 2;
-		ReleaseMutex(hMutexIncrementNSEQ);
-		// Fim da região crítica
 		if (mustSend) {
+			// Região crítica para numero de sequência
+			WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+			sprintf_s(variableProcess, 35, "%05d$55%s", nSeqSend, data_readed);
+			nSeqSend = nSeqSend + 2;
+			ReleaseMutex(hMutexIncrementNSEQ);
+			// Fim da região crítica
+		
 			//Região crítica envio de dados no socket
 			WaitForSingleObject(hMutexSend, INFINITE);
 			iSendResult = send(ClientSocket, variableProcess, strlen(variableProcess), 0);
