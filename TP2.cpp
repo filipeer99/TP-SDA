@@ -1,3 +1,27 @@
+// Simple OPC Client
+//
+// This is a modified version of the "Simple OPC Client" originally
+// developed by Philippe Gras (CERN) for demonstrating the basic techniques
+// involved in the development of an OPC DA client.
+//
+// The modifications are the introduction of two C++ classes to allow the
+// the client to ask for callback notifications from the OPC server, and
+// the corresponding introduction of a message comsumption loop in the
+// main program to allow the client to process those notifications. The
+// C++ classes implement the OPC DA 1.0 IAdviseSink and the OPC DA 2.0
+// IOPCDataCallback client interfaces, and in turn were adapted from the
+// KEPWARE´s  OPC client sample code. A few wrapper functions to initiate
+// and to cancel the notifications were also developed.
+//
+// The original Simple OPC Client code can still be found (as of this date)
+// in
+//        http://pgras.home.cern.ch/pgras/OPCClientTutorial/
+//
+//
+// Luiz T. S. Mendes - DELT/UFMG - 15 Sept 2011
+// luizt at cpdee.ufmg.br
+//
+
 #include <atlbase.h>    // required for using the "_T" macro
 #include <iostream>
 #include <ObjIdl.h>
@@ -42,8 +66,8 @@ typedef unsigned* CAST_LPDWORD;
 // them. The one below refers to the OPC DA 1.0 IDataObject interface.
 UINT OPC_DATA_TIME = RegisterClipboardFormat(_T("OPCSTMFORMATDATATIME"));
 
-const wchar_t* itemID_Read[3] = { L"Random.Real4",L"Saw-toothed Waves.Real4",L"Triangle Waves.Real4"};
-enum VARENUM typesRead[5] = { VT_R4, VT_R4, VT_R4};
+const wchar_t* itemID_Read[3] = { L"Random.Real4",L"Saw-toothed Waves.Real4",L"Triangle Waves.Real4" };
+enum VARENUM typesRead[5] = { VT_R4, VT_R4, VT_R4 };
 
 const wchar_t* itemID_Write[3] = { L"Bucket Brigade.Real8",L"Bucket Brigade.Real4",L"Bucket Brigade.Int4" };
 enum VARENUM typesWrite[3] = { VT_R8,VT_R4, VT_I4 };
@@ -79,14 +103,12 @@ void closingOPCvariables();
 // -------------------- Fim Parte OPC -------------------- //
 
 
-// -------------------- Começo Parte Servidor -------------------- //
+// -------------------- Começo Parte Cliente TCP/IP -------------------- //
 
-#define DEFAULT_PORT "2342"
+#define DEFAULT_PORT "3445"
 #define DEFAULT_BUFLEN 250
 int iResultSock;
 
-SOCKET ListenSocket = INVALID_SOCKET;
-// Socket temporario para aceitar conexões
 SOCKET ClientSocket = INVALID_SOCKET;
 
 
@@ -95,8 +117,11 @@ int initSocks();
 // -------------------- Fim Parte Servidor -------------------- //
 
 int ProcessMsg(CHAR* buffer);
-HANDLE hEvents[5];
-LPCWSTR eventNames[6] = {L"EscEvent", L"Requisition" L"SyncRequest", L"AsyncRequest", L"SyncResponse", L"AsyncResponse"};
+HANDLE hEventsESC;
+HANDLE hMutexChange, hMutexIncrementNSEQ, hMutexSend;
+int nSeqSend = 1, nseqRecv = 2;
+bool mustWrite = false;
+
 char tecla = 0;
 #define ESC		   0x1B
 
@@ -105,10 +130,11 @@ void main(void)
 	InitOPCvariables();
 	initSocks();
 	DWORD dwThreadId1, dwThreadId2;
+	hEventsESC = CreateEvent(NULL, TRUE, FALSE, L"EscEvent");
+	hMutexChange = CreateMutex(NULL, FALSE, L"MutexChange");
+	hMutexIncrementNSEQ = CreateMutex(NULL, FALSE, L"MutexIncrementNSEQ");
+	hMutexSend = CreateMutex(NULL, FALSE, L"MutexSend");
 
-	for (int i = 0; i < 5; i++) {
-		hEvents[i] = CreateEvent(NULL, TRUE, FALSE, eventNames[i]);
-	}
 	HANDLE hThread1 = (HANDLE)_beginthreadex(
 		NULL,
 		0,
@@ -129,49 +155,67 @@ void main(void)
 		(CAST_LPDWORD)&dwThreadId2	// casting necessário
 	);
 
-	if (hThread2) printf("Thread de leitura do socket criada com Id= %0x \n", dwThreadId2);
+	if (hThread2) printf("Thread de leitura do teclado criada com Id= %0x \n", dwThreadId2);
 	loopingReadOPC();
 	HANDLE threads[2] = { hThread1, hThread2 };
 	WaitForMultipleObjects(2, threads, TRUE, 5000);
 
 	closesocket(ClientSocket);
-	closesocket(ListenSocket);
 	WSACleanup();
 
 	CloseHandle(hThread1);
 	CloseHandle(hThread2);
-	for (int i = 0; i < 5; i++) {
-		CloseHandle(hEvents[i]);
-	}
+	CloseHandle(hEventsESC);
+	CloseHandle(hMutexChange);
+	CloseHandle(hMutexSend);
+	CloseHandle(hMutexIncrementNSEQ);
+
 	closingOPCvariables();
 }
 
 void loopingReadOPC() {
 	DWORD posH;
-	do {//LPCSTR eventNames[5] = { "EscEvent", "SyncRequest", "AsyncRequest", "SyncResponse", "AsyncResponse"};
-		posH = WaitForMultipleObjects(3, hEvents, FALSE, INFINITE);
-		if (posH - WAIT_OBJECT_0 == 2) {
-			ResetEvent(/*hEvents[2]*/hEvents[3]);
-			bRet = GetMessage(&msg, NULL, 0, 0);
-
-			if (!bRet) {
-				printf("Failed to get windows message! Error code = %d\n", GetLastError());
-				exit(0);
-			}
-
-			memset(data_readed, 0, 50);
-			TranslateMessage(&msg); // This call is not really needed ...
-			DispatchMessage(&msg);  // ... but this one is!
-			SetEvent(/*hEvents[4]*/hEvents[5]);
-		}
-		if (posH - WAIT_OBJECT_0 == 1) {
-			ResetEvent(/*hEvents[1]*/hEvents[2]);
-			WriteItem(pIOPCItemMgt[1], hServerItemWrite, writeVals, 3);
-			SetEvent(/*hEvents[3]*/hEvents[4]);
-		}
-		if (posH - WAIT_OBJECT_0 == 0) {
+	int iSendResult;
+	char variableProcess[35];
+	memset(variableProcess, 0, 35);
+	do {
+		posH = WaitForSingleObject(hEventsESC, 0);
+		if (posH == WAIT_OBJECT_0) {
 			break;
 		}
+
+		bRet = GetMessage(&msg, NULL, 0, 0);
+		if (!bRet) {
+			printf("Failed to get windows message! Error code = %d\n", GetLastError());
+			exit(0);
+		}
+
+		memset(data_readed, 0, 50);
+		TranslateMessage(&msg); // This call is not really needed ...
+		DispatchMessage(&msg);  // ... but this one is!
+
+		if (WaitForSingleObject(hMutexChange, 0) == WAIT_OBJECT_0) {
+			if (mustWrite) {
+				WriteItem(pIOPCItemMgt[1], hServerItemWrite, writeVals, 3);
+				mustWrite = FALSE;
+			}
+			ReleaseMutex(hMutexChange);
+		}
+
+		// Região crítica para numero de sequência
+		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+		sprintf_s(variableProcess, 35, "%05d$55%s", nSeqSend, data_readed);
+		nSeqSend = nSeqSend + 2;
+		ReleaseMutex(hMutexIncrementNSEQ);
+		// Fim da região crítica
+
+		//Região crítica envio de dados no socket
+		WaitForSingleObject(hMutexSend, INFINITE);
+		iSendResult = send(ClientSocket, variableProcess, strlen(variableProcess), 0);
+		ReleaseMutex(hMutexSend);
+		// Fim da região crítica
+		printf("enviado - %s\n", variableProcess);
+		memset(variableProcess, 0, 35);
 
 	} while (TRUE);
 }
@@ -186,6 +230,7 @@ void InitOPCvariables() {
 	printf("Instantiating the MATRIKON OPC Server for Simulation...\n");
 	pIOPCServer = InstantiateServer((wchar_t*)OPC_SERVER_NAME);
 
+	// inicializando as variáveis de escrita
 	for (int i = 0; i < 3; i++) {
 		VariantInit(&writeVals[i]);
 		writeVals[i].vt = typesWrite[i];
@@ -199,7 +244,7 @@ void InitOPCvariables() {
 	}
 
 	// Add the OPC item in order to print the item name in the console.
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 3; i++) {
 		printf("Adding the READ item %ls to the group 1...\n", itemID_Read[i]);
 		AddTheItem(pIOPCItemMgt[0], hServerItemRead[i], (wchar_t*)itemID_Read[i], typesRead[i]);
 	}
@@ -233,7 +278,7 @@ void closingOPCvariables() {
 	//pIConnectionPoint->Release();
 	pSOCDataCallback->Release();
 
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 3; i++) {
 		// Remove the OPC item:
 		printf("Removing the OPC item %ws\n", itemID_Read[i]);
 		RemoveItem(pIOPCItemMgt[0], hServerItemRead[i]);
@@ -262,6 +307,8 @@ void closingOPCvariables() {
 }
 
 int initSocks() {
+
+	SOCKADDR_IN ServerAddr;
 	WSADATA wsaData;
 
 	// Inicializa Winsock
@@ -271,112 +318,135 @@ int initSocks() {
 		return 1;
 	}
 
-	struct addrinfo* result = NULL, * ptr = NULL, hints;
+	struct addrinfo* ptr = NULL, hints;
 
-	ZeroMemory(&hints, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = AI_PASSIVE;
-
-	// Resolve o local address e a porta porta para ser usada no servidor
-	iResultSock = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
-	if (iResultSock != 0) {
-		printf("getaddrinfo failed: %d\n", iResultSock);
+	ZeroMemory(&ServerAddr, sizeof(ServerAddr));
+	ServerAddr.sin_family = AF_INET;
+	int das = atoi(DEFAULT_PORT);
+	ServerAddr.sin_port = htons(atoi(DEFAULT_PORT));
+	// Substitua inet_addr por inet_pton
+	if (inet_pton(AF_INET, "127.0.0.1", &ServerAddr.sin_addr) != 1) {
+		printf("inet_pton failed: %d\n", WSAGetLastError());
 		WSACleanup();
 		return 1;
 	}
 
-	ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-	printf("Waiting for new connections...\n");
-
-	if (ListenSocket == INVALID_SOCKET) {
-		printf("Error at socket(): %ld\n", WSAGetLastError());
-		freeaddrinfo(result);
+	// Create a SOCKET for connecting to server
+	ClientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (ClientSocket == INVALID_SOCKET) {
+		printf("socket failed with error: %ld\n", WSAGetLastError());
 		WSACleanup();
 		return 1;
 	}
 
-	// Configura a "escuta" do Socket TCP
-	iResultSock = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+	// Connect to server.
+	iResultSock = connect(ClientSocket, (SOCKADDR*)&ServerAddr, sizeof(ServerAddr));
 	if (iResultSock == SOCKET_ERROR) {
-		printf("bind failed with error: %d\n", WSAGetLastError());
-		freeaddrinfo(result);
-		closesocket(ListenSocket);
-		WSACleanup();
-		return 1;
+		closesocket(ClientSocket);
+		ClientSocket = INVALID_SOCKET;
+		printf("socket failed with error: %ld\n", WSAGetLastError());
 	}
-	freeaddrinfo(result);
 
-	if (listen(ListenSocket, 5) == SOCKET_ERROR) {
-		printf("Listen failed with error: %ld\n", WSAGetLastError());
-		closesocket(ListenSocket);
+
+	if (ClientSocket == INVALID_SOCKET) {
+		printf("Unable to connect to server!\n");
 		WSACleanup();
 		return 1;
 	}
+
 }
 
 int ProcessMsg(CHAR* buffer) {
-	PSTR pointer, pointer2, pointer3, nextToken;
-	CHAR part[25];
-	int nSeq;
-	CHAR bufferOut[60];
-	int iSendResult = 0;
+	PSTR pointer2, pointer3, pointer1, nextToken;
+	CHAR bufferOut[10];
+	int iSendResult = 0, nSeq;
+	bool cmp, cmpBigger;
 
-	pointer3 = strtok_s(buffer, "$", &nextToken);
-	pointer = strtok_s(NULL, "$", &nextToken);
-	do {
-		memset(bufferOut, 0, 60);
-		memset(part, 0, 25);
-		if (strcmp(pointer, "99") == 0) {
-			strncpy_s(part, nextToken, 6);
-			printf("reicived: %s|%s\n", pointer, part);
-			pointer = nextToken + 6;
-			nSeq = atoi(part) + 1;
-			SetEvent(/*hEvents[2]*/hEvents[3]);
-			WaitForSingleObject(/*hEvents[4]*/hEvents[5], INFINITE);
-			ResetEvent(/*hEvents[4]*/hEvents[5]);
-			sprintf_s(bufferOut, 60, "%06d$55%s", nSeq, data_readed);
-			iSendResult = send(ClientSocket, bufferOut, strlen(bufferOut), 0);
+
+	pointer1 = strtok_s(buffer, "$", &nextToken);
+	pointer2 = strtok_s(NULL, "$", &nextToken);
+
+	if (strcmp(pointer2, "99") == 0) {
+		//strncpy_s(part, nextToken, 6);
+		printf("reicived: %s$%s - ", pointer1, pointer2);
+		nSeq = atoi(pointer1);
+
+		// Região crítica - Número de sequência
+		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+		cmp = nSeq == nseqRecv;
+		cmpBigger = nSeq > nseqRecv;
+		nseqRecv = nseqRecv + 2;
+		ReleaseMutex(hMutexIncrementNSEQ);
+		// Fim região crítica
+
+		if (cmp) {
+			puts("Sequência conforme");
 		}
-
-		/*else if (strcmp(pointer, "33") == 0) {
-			strncpy_s(part, nextToken, 6);
-			printf("reicived: %s|%s\n", pointer, part);
-			pointer = nextToken + 6;
-			nSeq = atoi(part);
-		}*/
-
-		else if (strcmp(pointer, "45") == 0) {
-			nSeq = atoi(pointer3) + 1;
-
-			// strncpy_s(next, nextToken, 19);
-			printf("reicived: %s$%s$%s\n", pointer3, pointer, nextToken);
-
-			pointer2 = strtok_s(NULL, "$", &nextToken);
-			aux1 = (double)atof(pointer2);
-			pointer2 = strtok_s(NULL, "$", &nextToken);
-			aux2 = (float)atof(pointer2);
-			pointer2 = strtok_s(NULL, "$", &nextToken);
-			aux3 = (unsigned)atoi(pointer2);
-			
-			writeVals[0].dblVal = aux1;
-			writeVals[1].fltVal = aux2;
-			writeVals[2].intVal = aux3;
-
-			SetEvent(/*hEvents[1]*/hEvents[2]);
-			WaitForSingleObject(/*hEvents[3]*/hEvents[4], INFINITE);
-			ResetEvent(/*hEvents[3]*/hEvents[4]);
-
-			sprintf_s(bufferOut, 60, "%06d$00", nSeq);
-			iSendResult = send(ClientSocket, bufferOut, strlen(bufferOut), 0);
+		else if (cmpBigger) {
+			puts("Resposta a msg posterior");
 		}
 		else {
-
+			puts("Resposta a msg anterior");
 		}
-		pointer = strtok_s(pointer, "|", &nextToken);
-	} while (pointer != NULL && iSendResult != SOCKET_ERROR);
+	}
 
+	else if (strcmp(pointer2, "45") == 0) {
+		nSeq = atoi(pointer1);
+
+		// strncpy_s(next, nextToken, 19);
+		printf("recebido: %s$%s$%s - ", pointer1, pointer2, nextToken);
+
+		// Região crítica - Número de sequência
+		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+		cmp = nSeq == nseqRecv;
+		cmpBigger = nSeq > nseqRecv;
+		nseqRecv = nseqRecv + 2;
+		ReleaseMutex(hMutexIncrementNSEQ);
+		// Fim região crítica
+
+		if (cmp) {
+			puts("Sequência conforme");
+		}
+		else if (cmpBigger) {
+			puts("Resposta a msg posterior");
+		}
+		else {
+			puts("Resposta a msg anterior");
+		}
+
+		pointer3 = strtok_s(NULL, "$", &nextToken);
+		aux1 = (double)atof(pointer3);
+		pointer3 = strtok_s(NULL, "$", &nextToken);
+		aux2 = (float)atof(pointer3);
+		pointer3 = strtok_s(NULL, "$", &nextToken);
+		aux3 = (unsigned)atoi(pointer3);
+
+		// Seção crítica - alteração dos valores de escrita OPC
+		WaitForSingleObject(hMutexChange, INFINITE);
+		writeVals[0].dblVal = aux1;
+		writeVals[1].fltVal = aux2;
+		writeVals[2].intVal = aux3;
+		mustWrite = TRUE;
+		ReleaseMutex(hMutexChange);
+		// Fim seção crítica
+
+		memset(bufferOut, 0, 10);
+		WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+		sprintf_s(bufferOut, 10, "%05d$00", nSeqSend);
+		nSeqSend++;
+		nseqRecv++;
+		ReleaseMutex(hMutexIncrementNSEQ);
+
+		// Região crítica envio de dados pela rede
+		WaitForSingleObject(hMutexSend, INFINITE);
+		iSendResult = send(ClientSocket, bufferOut, strlen(bufferOut), 0);
+		ReleaseMutex(hMutexSend);
+		// Fim seção crítica
+		printf("enviado - %s\n", bufferOut);
+	}
+	else {
+
+	}
 	if (iSendResult == SOCKET_ERROR) {
 
 		printf("send failed: %d\n", WSAGetLastError());
@@ -389,57 +459,58 @@ int ProcessMsg(CHAR* buffer) {
 DWORD WINAPI loopingReadSocket(LPVOID lpParameter) {
 	char recvbuf[DEFAULT_BUFLEN];
 	int bufLen = DEFAULT_BUFLEN;
-
+	DWORD res;
 	while (tecla != ESC) {
-		// Aceita um cliente socket
-		ClientSocket = accept(ListenSocket, NULL, NULL);
-
-		if (ClientSocket == INVALID_SOCKET) {
-			printf("accept failed: %d\n", WSAGetLastError());
-			closesocket(ListenSocket);
-			WSACleanup();
-			break;
+		bufLen = DEFAULT_BUFLEN;
+		memset(recvbuf, 0, bufLen);
+		iResultSock = recv(ClientSocket, recvbuf, 9, 0);
+		if (iResultSock > 8) {
+			iResultSock = recv(ClientSocket, recvbuf + 9, 15, 0);
 		}
-		printf("New connection accepted..\n");
 
-		const WSAEVENT evs[2] = { hEvents[0], (WSAEVENT)ClientSocket };
-		DWORD res;
-		while (true) {
-			bufLen = DEFAULT_BUFLEN;
-			res = WaitForSingleObject(hEvents[0], 0);
-			if (res == WAIT_OBJECT_0) {
-				break;
-			}
-			memset(recvbuf, 0, bufLen);
-			iResultSock = recv(ClientSocket, recvbuf, bufLen, 0);
+		if (iResultSock > 0) {
+			if (ProcessMsg(recvbuf)) break;
 
-			if (iResultSock > 0) {
-				if (ProcessMsg(recvbuf)) break;
+		}
+		else if (iResultSock == 0) {
+			printf("Connection closing...\n");
+			closesocket(ClientSocket);
+			break;
 
-			}
-			else if (iResultSock == 0) {
-				printf("Connection closing...\n");
-				closesocket(ClientSocket);
-				break;
+		}
 
-			}
-
-			else {
-				printf("recv failed: %d\n", WSAGetLastError());
-				closesocket(ClientSocket);
-				break;
-			}
+		else {
+			printf("recv failed: %d\n", WSAGetLastError());
+			closesocket(ClientSocket);
+			break;
 		}
 	}
 	return 0;
 }
 
 DWORD WINAPI loopEsc(LPVOID lpParameter) {
+	char Requisition[10];
+	int iSendResult;
+	memset(Requisition, 0, 10);
 	while (tecla != ESC) {
 		tecla = _getch();
-		if (tecla == 's')
-			SetEvent(hEvents[1]);
+		if (tecla == 's') {
+			// Região Crítica número de sequencia
+			WaitForSingleObject(hMutexIncrementNSEQ, INFINITE);
+			sprintf_s(Requisition, 35, "%05d$33", nSeqSend);
+			nSeqSend = nSeqSend + 2;
+			ReleaseMutex(hMutexIncrementNSEQ);
+			// Fim da região crítica
+
+			// Região crítica envio de dados pela rede
+			WaitForSingleObject(hMutexSend, INFINITE);
+			iSendResult = send(ClientSocket, Requisition, strlen(Requisition), 0);
+			ReleaseMutex(hMutexSend);
+			// Fim da seção crítica
+			printf("enviado - %s\n", Requisition);
+			memset(Requisition, 0, 10);
+		}
 	}
-	SetEvent(hEvents[0]);
+	SetEvent(hEventsESC);
 	return 0;
 }

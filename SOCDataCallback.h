@@ -1,3 +1,13 @@
+// Class for implementing the client-side IOPCDataCallback interface.
+// This is based on the KEPWARE sample client code, to which goes all
+// credits.
+//
+// Though the OPC DA 2.0 Spec defines 4 methods for this interface,
+// in this example code only the OnDataChange() method is implemented.
+//
+// Luiz T. S. Mendes - DELT/UFMG - 05/09/2011
+// 
+
 #include "opcda.h"
 extern CHAR data_readed[50];
 

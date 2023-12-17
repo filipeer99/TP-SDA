@@ -1,3 +1,11 @@
+//
+// C++ module with additional wrapper functions to extend CERN´s
+// "Simple OPC Client" functionalities in order to allow OPC server
+// callbacks (both OPC DA 1.0 IDataAdviseSink and OPC DA 2.0
+// IOPCDataCallback.
+//
+// Luiz T. S. Mendes - DELT/UFMG - 13 Sept 2011
+
 #include <ObjIdl.h>
 #include <stdio.h>
 #include "opcda.h"

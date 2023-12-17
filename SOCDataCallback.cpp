@@ -1,3 +1,12 @@
+//
+// C++ class to implement the OPC DA 2.0 IOPCDataCallback interface.
+//
+// Note that only the ::OnDataChangeMethod() is currently implemented
+// here. This code is largely based on the KEPWARE´s sample client code.
+//
+// Luiz T. S. Mendes - DELT/UFMG - 13 Sept 2011
+//
+
 #include <stdio.h>
 #include "SOCDataCallback.h"
 #include "SOCWrapperFunctions.h"
