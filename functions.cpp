@@ -63,7 +63,7 @@ void AddTheGroup(IOPCServer* pIOPCServer, IOPCItemMgt*& pIOPCItemMgt,
 	// Add an OPC group and get a pointer to the IUnknown I/F:
 	HRESULT hr = pIOPCServer->AddGroup(/*szName*/ group,
 		/*bActive*/ FALSE,
-		/*dwRequestedUpdateRate*/ 2000,
+		/*dwRequestedUpdateRate*/ 1000,
 		/*hClientGroup*/ hClientGroup,
 		/*pTimeBias*/ 0,
 		/*pPercentDeadband*/ 0,

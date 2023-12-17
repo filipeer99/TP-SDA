@@ -120,7 +120,7 @@ int ProcessMsg(CHAR* buffer);
 HANDLE hEventsESC;
 HANDLE hMutexChange, hMutexIncrementNSEQ, hMutexSend;
 int nSeqSend = 1, nseqRecv = 2;
-bool mustWrite = false;
+bool mustWrite = false, mustSend = true;
 
 char tecla = 0;
 #define ESC		   0x1B
@@ -208,15 +208,16 @@ void loopingReadOPC() {
 		nSeqSend = nSeqSend + 2;
 		ReleaseMutex(hMutexIncrementNSEQ);
 		// Fim da região crítica
-
-		//Região crítica envio de dados no socket
-		WaitForSingleObject(hMutexSend, INFINITE);
-		iSendResult = send(ClientSocket, variableProcess, strlen(variableProcess), 0);
-		ReleaseMutex(hMutexSend);
-		// Fim da região crítica
-		printf("enviado - %s\n", variableProcess);
+		if (mustSend) {
+			//Região crítica envio de dados no socket
+			WaitForSingleObject(hMutexSend, INFINITE);
+			iSendResult = send(ClientSocket, variableProcess, strlen(variableProcess), 0);
+			ReleaseMutex(hMutexSend);
+			// Fim da região crítica
+			printf("enviado - %s\n", variableProcess);
+		}
+		mustSend = !mustSend;
 		memset(variableProcess, 0, 35);
-
 	} while (TRUE);
 }
 
