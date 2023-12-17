@@ -105,7 +105,7 @@ void closingOPCvariables();
 
 // -------------------- Começo Parte Cliente TCP/IP -------------------- //
 
-#define DEFAULT_PORT "3445"
+#define DEFAULT_PORT "2342"
 #define DEFAULT_BUFLEN 250
 int iResultSock;
 
