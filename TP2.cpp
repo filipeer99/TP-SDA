@@ -112,7 +112,7 @@ int iResultSock;
 SOCKET ClientSocket = INVALID_SOCKET;
 
 
-int initSocks();
+int initSocks(const char* adress);
 
 // -------------------- Fim Parte Servidor -------------------- //
 
@@ -125,10 +125,15 @@ bool mustWrite = false, mustSend = true;
 char tecla = 0;
 #define ESC		   0x1B
 
-void main(void)
+void main(int argc, char** argv)
 {
 	InitOPCvariables();
-	initSocks();
+	if (argc == 2) {
+		initSocks(argv[1]);
+	}
+	else {
+		initSocks("127.0.0.1");
+	}
 	DWORD dwThreadId1, dwThreadId2;
 	hEventsESC = CreateEvent(NULL, TRUE, FALSE, L"EscEvent");
 	hMutexChange = CreateMutex(NULL, FALSE, L"MutexChange");
@@ -307,7 +312,7 @@ void closingOPCvariables() {
 	CoUninitialize();
 }
 
-int initSocks() {
+int initSocks(const char* adress) {
 
 	SOCKADDR_IN ServerAddr;
 	WSADATA wsaData;
@@ -326,7 +331,7 @@ int initSocks() {
 	int das = atoi(DEFAULT_PORT);
 	ServerAddr.sin_port = htons(atoi(DEFAULT_PORT));
 	// Substitua inet_addr por inet_pton
-	if (inet_pton(AF_INET, "127.0.0.1", &ServerAddr.sin_addr) != 1) {
+	if (inet_pton(AF_INET, adress, &ServerAddr.sin_addr) != 1) {
 		printf("inet_pton failed: %d\n", WSAGetLastError());
 		WSACleanup();
 		return 1;
