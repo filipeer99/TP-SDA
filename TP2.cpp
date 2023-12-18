@@ -94,11 +94,11 @@ int bRet;
 MSG msg;
 VARIANT writeVals[3];
 
-DWORD WINAPI loopingReadSocket(LPVOID lpParameter);
-DWORD WINAPI loopEsc(LPVOID lpParameter);
-void loopingReadOPC();
-void InitOPCvariables();
-void closingOPCvariables();
+DWORD WINAPI ReadingSock(LPVOID lpParameter);
+DWORD WINAPI GetKeyboard(LPVOID lpParameter);
+void ReadAndWriteOPC();
+void InitOPC();
+void ClosingOPC();
 
 // -------------------- Fim Parte OPC -------------------- //
 
@@ -127,7 +127,7 @@ char tecla = 0;
 
 void main(int argc, char** argv)
 {
-	InitOPCvariables();
+	InitOPC();
 	if (argc == 2) {
 		initSocks(argv[1]);
 	}
@@ -143,7 +143,7 @@ void main(int argc, char** argv)
 	HANDLE hThread1 = (HANDLE)_beginthreadex(
 		NULL,
 		0,
-		(CAST_FUNCTION)loopingReadSocket,
+		(CAST_FUNCTION)ReadingSock,
 		NULL,
 		0,
 		(CAST_LPDWORD)&dwThreadId1	// casting necessário
@@ -154,14 +154,14 @@ void main(int argc, char** argv)
 	HANDLE hThread2 = (HANDLE)_beginthreadex(
 		NULL,
 		0,
-		(CAST_FUNCTION)loopEsc,
+		(CAST_FUNCTION)GetKeyboard,
 		NULL,
 		0,
 		(CAST_LPDWORD)&dwThreadId2	// casting necessário
 	);
 
 	if (hThread2) printf("Thread de leitura do teclado criada com Id= %0x \n", dwThreadId2);
-	loopingReadOPC();
+	ReadAndWriteOPC();
 	HANDLE threads[2] = { hThread1, hThread2 };
 	WaitForMultipleObjects(2, threads, TRUE, 5000);
 
@@ -175,10 +175,10 @@ void main(int argc, char** argv)
 	CloseHandle(hMutexSend);
 	CloseHandle(hMutexIncrementNSEQ);
 
-	closingOPCvariables();
+	ClosingOPC();
 }
 
-void loopingReadOPC() {
+void ReadAndWriteOPC() {
 	DWORD posH;
 	int iSendResult;
 	char variableProcess[35];
@@ -221,12 +221,15 @@ void loopingReadOPC() {
 			// Fim da região crítica
 			printf("enviado - %s\n", variableProcess);
 		}
+		else {
+			printf("Dados obtidos mas não transmitidos: %s\n", data_readed + 1);
+		}
 		mustSend = !mustSend;
 		memset(variableProcess, 0, 35);
 	} while (TRUE);
 }
 
-void InitOPCvariables() {
+void InitOPC() {
 
 	// Have to be done before using microsoft COM library:
 	printf("Initializing the COM environment...\n");
@@ -277,7 +280,7 @@ void InitOPCvariables() {
 	memset(data_readed, 0, 50);
 }
 
-void closingOPCvariables() {
+void ClosingOPC() {
 	// Cancel the callback and release its reference
 	printf("Cancelling the IOPCDataCallback notifications...\n");
 	CancelDataCallback(pIConnectionPoint, dwCookie);
@@ -462,7 +465,7 @@ int ProcessMsg(CHAR* buffer) {
 	return 0;
 }
 
-DWORD WINAPI loopingReadSocket(LPVOID lpParameter) {
+DWORD WINAPI ReadingSock(LPVOID lpParameter) {
 	char recvbuf[DEFAULT_BUFLEN];
 	int bufLen = DEFAULT_BUFLEN;
 	DWORD res;
@@ -494,7 +497,7 @@ DWORD WINAPI loopingReadSocket(LPVOID lpParameter) {
 	return 0;
 }
 
-DWORD WINAPI loopEsc(LPVOID lpParameter) {
+DWORD WINAPI GetKeyboard(LPVOID lpParameter) {
 	char Requisition[10];
 	int iSendResult;
 	memset(Requisition, 0, 10);
